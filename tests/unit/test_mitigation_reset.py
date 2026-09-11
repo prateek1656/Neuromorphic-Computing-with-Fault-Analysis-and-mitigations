@@ -17,8 +17,8 @@ def test_layer_reset_restores_weights_and_rewrites_every_handle():
     layer.weight.data.fill_(999.0)  # simulate drifted/corrupted weights
 
     handles = [
-        type("H", (), {"crossbar": FakeCrossbar((4, 4))})(),
-        type("H", (), {"crossbar": FakeCrossbar((4, 4))})(),
+        type("H", (), {"accessor": FakeCrossbar((4, 4))})(),
+        type("H", (), {"accessor": FakeCrossbar((4, 4))})(),
     ]
 
     ok = apply_layer_reset(
@@ -33,8 +33,8 @@ def test_layer_reset_restores_weights_and_rewrites_every_handle():
 
     assert ok is True
     assert torch.equal(layer.weight.data, original_weight)
-    assert torch.allclose(handles[0].crossbar.conductance_matrix, torch.ones(4, 4) / 100.0)
-    assert torch.allclose(handles[1].crossbar.conductance_matrix, torch.ones(4, 4) / 10000.0)
+    assert torch.allclose(handles[0].accessor.read(), torch.ones(4, 4) / 100.0)
+    assert torch.allclose(handles[1].accessor.read(), torch.ones(4, 4) / 10000.0)
 
 
 def test_layer_reset_returns_false_on_failure_never_silently_succeeds():
@@ -45,7 +45,7 @@ def test_layer_reset_returns_false_on_failure_never_silently_succeeds():
     original_weight = layer.weight.data.clone()
 
     # Mismatched handle count vs. what the mapping routine produces -> must fail loudly.
-    handles = [type("H", (), {"crossbar": FakeCrossbar((4, 4))})()]
+    handles = [type("H", (), {"accessor": FakeCrossbar((4, 4))})()]
 
     ok = apply_layer_reset(
         layer,

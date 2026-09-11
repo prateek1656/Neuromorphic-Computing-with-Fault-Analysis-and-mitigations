@@ -4,14 +4,20 @@ version = "0.1.0"
 description = "Fault-tolerant memristive crossbar neuromorphic computing simulation"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.2,<2.3",
-    "torchvision>=0.17,<0.18",
+    # No upper bound: XBTorch needs torch>=2.3 and AIHWKit hard-pins torch==2.13.0
+    # (2.13.0 satisfies both >=2.2 here and xbtorch's >=2.3, so - contrary to an
+    # earlier assumption before actually checking the numbers - a single
+    # environment CAN satisfy all three simultaneously; an upper bound here would
+    # have been the only real source of conflict).
+    "torch>=2.2",
+    "torchvision>=0.17",
     "numpy>=1.26,<2.0",
     "pandas>=2.2,<3.0",
     "matplotlib>=3.8,<4.0",
     "pyyaml>=6.0,<7.0",
 ]
 
+[project.optional-dependencies]
 # memtorch is intentionally NOT declared as a project/optional dependency here.
 # Its setup.py builds a CUDA extension unconditionally and fails at build-metadata
 # time on any machine without an NVIDIA driver (confirmed in this sandbox) -
@@ -21,6 +27,12 @@ dependencies = [
 #   uv pip install torch && uv pip install memtorch --no-build-isolation
 # The core neurofault package and its unit tests never import memtorch directly
 # at module scope (see tests/unit/fakes.py) so they work without it.
+xbtorch = [
+    "xbtorch @ git+https://github.com/ADAM-Lab-GW/xbtorch.git",
+]
+aihwkit = [
+    "aihwkit>=1.1.0",
+]
 
 [dependency-groups]
 dev = [
@@ -37,6 +49,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/neurofault"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

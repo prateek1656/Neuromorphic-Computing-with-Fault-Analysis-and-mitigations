@@ -58,6 +58,10 @@ class MitigationConfig:
 class ExperimentConfig:
     name: str
     seed: int = 42
+    simulator: str = "memtorch"  # "memtorch" | "xbtorch" | "aihwkit" - which crossbar
+    #   simulation backend patches the model. Named distinctly from FaultConfig.backend
+    #   (which picks the fault-injection *method*, not the simulation library) to avoid
+    #   confusing the two independent axes.
     dataset: str = "cifar10"  # "cifar10" | "mnist"
     train_samples: int = 2000
     test_samples: int = 1000

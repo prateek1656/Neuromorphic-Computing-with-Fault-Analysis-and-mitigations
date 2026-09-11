@@ -7,8 +7,10 @@ def test_get_critical_devices_finds_extreme_conductance_cells():
     monitor = HealthMonitor(handle)
 
     # Force two cells to the extremes; everything else stays mid-range and healthy.
-    handle.crossbar.conductance_matrix[0, 0] = monitor.g_min
-    handle.crossbar.conductance_matrix[2, 3] = monitor.g_max
+    matrix = handle.accessor.read()
+    matrix[0, 0] = monitor.g_min
+    matrix[2, 3] = monitor.g_max
+    handle.accessor.write(matrix)
 
     critical = set(monitor.get_critical_devices(extreme_threshold=0.02))
 

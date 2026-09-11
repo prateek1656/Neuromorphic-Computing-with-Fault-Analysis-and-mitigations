@@ -12,7 +12,7 @@ def test_custom_stuck_at_injects_requested_density():
     injected = inject_faults(handle, monitor, config)
 
     assert injected == 20
-    matrix = handle.crossbar.conductance_matrix
+    matrix = handle.accessor.read()
     at_extreme = ((matrix == monitor.g_min) | (matrix == monitor.g_max)).sum().item()
     assert at_extreme == 20
 

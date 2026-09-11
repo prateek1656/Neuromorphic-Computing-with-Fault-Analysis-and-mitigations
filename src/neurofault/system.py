@@ -17,7 +17,6 @@ import logging
 import torch
 
 from neurofault.config import ExperimentConfig
-from neurofault.crossbar.array import build_handles, patch_layers
 from neurofault.crossbar.health_monitor import HealthMonitor
 from neurofault.crossbar.self_healing import RedundancyPool
 from neurofault.devices.registry import build_device
@@ -28,14 +27,43 @@ from neurofault.mitigation.reset import apply_layer_reset
 logger = logging.getLogger(__name__)
 
 
+def _backend_module(simulator: str):
+    """Lazily import the crossbar backend module for the given simulator
+    name, so system.py never depends on a backend that isn't in use."""
+    if simulator == "memtorch":
+        from neurofault.crossbar.backends import memtorch_backend
+
+        return memtorch_backend
+    if simulator == "xbtorch":
+        from neurofault.crossbar.backends import xbtorch_backend
+
+        return xbtorch_backend
+    if simulator == "aihwkit":
+        from neurofault.crossbar.backends import aihwkit_backend
+
+        return aihwkit_backend
+    raise ValueError(f"Unknown simulator backend: {simulator!r}")
+
+
 class FaultTolerantNeuromorphic:
     def __init__(self, base_model: torch.nn.Module, config: ExperimentConfig):
         self.config = config
-        self.device_cls, self.device_params = build_device(config.device)
+        backend = _backend_module(config.simulator)
+        self.device_cls, self.device_params = build_device(config.device, config.simulator)
 
-        self.model = patch_layers(base_model, config.crossbar, self.device_cls, self.device_params)
+        self.model = backend.patch_layers(
+            base_model, config.crossbar, self.device_cls, self.device_params
+        )
 
-        self.handles = build_handles(self.model, self.device_params)
+        self.handles = backend.build_handles(self.model, self.device_params, config.crossbar)
+
+        # Not every backend has an equivalent to memtorch's naive_map for
+        # re-deriving conductances from weights - layer_reset degrades to
+        # "unavailable" (never a crash) for backends that don't define this.
+        mapping_routine_for = getattr(backend, "mapping_routine_for", None)
+        self._mapping_routine = (
+            mapping_routine_for(config.crossbar.scheme) if mapping_routine_for else None
+        )
         self.monitors = {name: HealthMonitor(h) for name, h in self.handles.items()}
         self.pools = {
             name: RedundancyPool(h, config.crossbar.redundancy_factor)
@@ -94,15 +122,22 @@ class FaultTolerantNeuromorphic:
 
             layer_name = self._find_layer_name(handle)
             reset_fn = None
-            if layer_name is not None:
+            if layer_name is not None and self._mapping_routine is not None:
                 reset_fn = lambda ln=layer_name, h=handle: apply_layer_reset(
                     h.layer,
                     self._layer_handles[ln],
                     self._original_weights[ln],
-                    _mapping_routine_for(self.config.crossbar.scheme),
+                    self._mapping_routine,
                     self.device_params.get("r_on", 100.0),
                     self.device_params.get("r_off", 10000.0),
                     scheme=self.config.crossbar.scheme,
+                )
+            elif layer_name is not None:
+                logger.debug(
+                    "Layer reset unavailable for simulator=%s (no mapping_routine_for); "
+                    "skipping reset for %s",
+                    self.config.simulator,
+                    layer_name,
                 )
 
             outcome = apply_runtime_mitigation(
@@ -141,9 +176,3 @@ class FaultTolerantNeuromorphic:
             if handle in handles:
                 return layer_name
         return None
-
-
-def _mapping_routine_for(scheme: str):
-    from memtorch.map.Parameter import naive_map
-
-    return naive_map

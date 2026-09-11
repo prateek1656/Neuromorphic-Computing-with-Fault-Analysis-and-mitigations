@@ -56,7 +56,7 @@ def apply_layer_reset(
             )
 
         for handle, matrix in zip(handles, matrices):
-            handle.crossbar.write_conductance_matrix(matrix)
+            handle.accessor.write(matrix)
 
         logger.info("Reset layer with %d crossbar(s) to original weights", len(handles))
         return True

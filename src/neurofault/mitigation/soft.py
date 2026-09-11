@@ -24,18 +24,19 @@ def apply_soft_mitigation(
 ) -> int:
     """Move each targeted cell's conductance `blend` fraction toward g_mid.
 
-    Writes directly into handle.crossbar.conductance_matrix - the same
-    object the forward pass and health monitor read.
+    Writes through handle.accessor - the same interface every other module
+    uses for this exact crossbar, regardless of backend.
     """
     if not critical_devices:
         return 0
 
     g_mid = (monitor.g_min + monitor.g_max) / 2
-    matrix = handle.crossbar.conductance_matrix
+    matrix = handle.accessor.read()
     mitigated = 0
     for row, col in critical_devices:
         matrix[row, col] = matrix[row, col] * (1 - blend) + g_mid * blend
         mitigated += 1
 
+    handle.accessor.write(matrix)
     logger.info("Soft-mitigated %d devices in %s", mitigated, handle.name)
     return mitigated

@@ -23,7 +23,7 @@ class HealthMonitor:
 
     def __init__(self, handle: CrossbarHandle):
         self.handle = handle
-        self.shape = tuple(handle.crossbar.conductance_matrix.shape)
+        self.shape = tuple(handle.accessor.shape)
 
         self.r_on = float(handle.device_params.get("r_on", 100.0))
         self.r_off = float(handle.device_params.get("r_off", 16000.0))
@@ -36,7 +36,7 @@ class HealthMonitor:
         self.stability_index = torch.ones(self.shape)
         self.operation_counts = torch.zeros(self.shape)
 
-        self.g_history: list[torch.Tensor] = [handle.crossbar.conductance_matrix.clone()]
+        self.g_history: list[torch.Tensor] = [handle.accessor.read().clone()]
         self.max_history = 20
 
         self.failure_probability = torch.zeros(self.shape)
@@ -46,7 +46,7 @@ class HealthMonitor:
     def update_health_metrics(
         self, voltage_applied: torch.Tensor | None = None, write_op: bool = False
     ):
-        current_g = self.handle.crossbar.conductance_matrix
+        current_g = self.handle.accessor.read()
         self.operation_counts += 1
 
         g_normalized = torch.clamp((current_g - self.g_min) / self.g_range, 0, 1)
@@ -82,9 +82,7 @@ class HealthMonitor:
             self.g_history.pop(0)
 
     def predict_faults(self) -> torch.Tensor:
-        g_normalized = torch.clamp(
-            (self.handle.crossbar.conductance_matrix - self.g_min) / self.g_range, 0, 1
-        )
+        g_normalized = torch.clamp((self.handle.accessor.read() - self.g_min) / self.g_range, 0, 1)
         proximity_to_extreme = torch.clamp(
             torch.max(4 * g_normalized**2, 4 * (1 - g_normalized) ** 2), 0.0, 1.0
         )
@@ -120,9 +118,7 @@ class HealthMonitor:
         torch.nonzero - never iterates every cell in Python.
         """
         self.predict_faults()
-        g_normalized = torch.clamp(
-            (self.handle.crossbar.conductance_matrix - self.g_min) / self.g_range, 0, 1
-        )
+        g_normalized = torch.clamp((self.handle.accessor.read() - self.g_min) / self.g_range, 0, 1)
         mask = (
             (self.health_scores < health_threshold)
             | (self.failure_probability > probability_threshold)

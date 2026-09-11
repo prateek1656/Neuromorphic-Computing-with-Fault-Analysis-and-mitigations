@@ -58,7 +58,7 @@ def _try_native(handle: CrossbarHandle, fault_config: FaultConfig) -> int | None
 def _custom_stuck_at(
     handle: CrossbarHandle, monitor: HealthMonitor, fault_config: FaultConfig
 ) -> int:
-    matrix = handle.crossbar.conductance_matrix
+    matrix = handle.accessor.read()
     rows, cols = matrix.shape
     total_devices = rows * cols
     num_faults = int(total_devices * fault_config.density)
@@ -75,6 +75,7 @@ def _custom_stuck_at(
 
     matrix[lrs_rows, lrs_cols] = monitor.g_min
     matrix[hrs_rows, hrs_cols] = monitor.g_max
+    handle.accessor.write(matrix)
 
     monitor.health_scores[fault_rows, fault_cols] = 0
     monitor.stability_index[fault_rows, fault_cols] = 0.1

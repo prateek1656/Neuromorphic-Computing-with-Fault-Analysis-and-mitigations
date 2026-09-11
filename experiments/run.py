@@ -143,6 +143,8 @@ def main() -> None:
     parser.add_argument("--num-batches", type=int)
     parser.add_argument("--train-samples", type=int)
     parser.add_argument("--test-samples", type=int)
+    parser.add_argument("--simulator", choices=["memtorch", "xbtorch", "aihwkit"])
+    parser.add_argument("--dataset", choices=["cifar10", "mnist"])
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -153,6 +155,8 @@ def main() -> None:
             "num_batches": args.num_batches,
             "train_samples": args.train_samples,
             "test_samples": args.test_samples,
+            "simulator": args.simulator,
+            "dataset": args.dataset,
         }.items()
         if v is not None
     }
