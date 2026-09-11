@@ -1,0 +1,95 @@
+"""Central dispatch for which mitigation strategy runs on a set of critical
+devices.
+
+Fixes the original codebase's bug #2: `_apply_runtime_fault_mitigation`'s
+final `else` branch called `reset_critical_layer` UNCONDITIONALLY, with no
+`enable_layer_reset` check - meaning a "No Mitigations" or "Soft Mitigation
+Only" experiment config could still silently trigger a full layer reset.
+
+Every branch here is guarded by its own `mitigation_config.enable_*` flag
+with no exception - if a branch's condition is met but its flag is off,
+nothing happens at all, full stop. There is no branch that calls a
+mitigation function unconditionally.
+
+Also fixes bug #4: soft mitigation is reachable directly from this runtime
+path (not only from a separate predictive path gated on history that may
+never accumulate).
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from neurofault.config import MitigationConfig
+from neurofault.crossbar.array import CrossbarHandle
+from neurofault.crossbar.health_monitor import HealthMonitor
+from neurofault.crossbar.self_healing import RedundancyPool
+from neurofault.mitigation.remap import apply_remap
+from neurofault.mitigation.soft import apply_soft_mitigation
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MitigationOutcome:
+    soft_mitigated: int = 0
+    remapped: int = 0
+    layer_reset: bool = False
+    actions_taken: list[str] = field(default_factory=list)
+
+
+def apply_runtime_mitigation(
+    handle: CrossbarHandle,
+    pool: RedundancyPool,
+    monitor: HealthMonitor,
+    critical_devices: list[tuple[int, int]],
+    avg_health: float,
+    mitigation_config: MitigationConfig,
+    reset_fn=None,  # Callable[[], bool] | None - injected so dispatch doesn't need
+    #                 to know layer-reset's full signature; None means "not available"
+) -> MitigationOutcome:
+    outcome = MitigationOutcome()
+    if not critical_devices:
+        return outcome
+
+    threshold = mitigation_config.health_threshold
+
+    if mitigation_config.force_remapping and mitigation_config.enable_remapping:
+        outcome.remapped = apply_remap(handle, pool, critical_devices)
+        outcome.actions_taken.append("forced_remap")
+        return outcome
+
+    if avg_health > threshold:
+        if mitigation_config.enable_soft_mitigation:
+            outcome.soft_mitigated = apply_soft_mitigation(handle, monitor, critical_devices)
+            outcome.actions_taken.append("soft_mitigation")
+        if mitigation_config.enable_remapping:
+            outcome.remapped = apply_remap(handle, pool, critical_devices)
+            outcome.actions_taken.append("remap")
+        return outcome
+
+    if avg_health > threshold / 2:
+        if mitigation_config.enable_layer_reset and reset_fn is not None:
+            outcome.layer_reset = reset_fn()
+            outcome.actions_taken.append("layer_reset")
+        # If layer reset is disabled here, nothing happens - no fallthrough.
+        return outcome
+
+    # Critical health: layer reset is the last resort, but ONLY if enabled.
+    # The original codebase called reset_critical_layer here with no flag
+    # check at all - that unconditional call is exactly what this dispatch
+    # structure makes impossible.
+    if mitigation_config.enable_layer_reset and reset_fn is not None:
+        outcome.layer_reset = reset_fn()
+        outcome.actions_taken.append("layer_reset")
+
+    if not outcome.actions_taken:
+        logger.debug(
+            "%d critical devices in %s but no mitigation enabled for current health (%.1f%%)",
+            len(critical_devices),
+            handle.name,
+            avg_health,
+        )
+
+    return outcome
