@@ -2,24 +2,36 @@
 
 Pure bookkeeping only - no conductance I/O happens here. This never touches
 a second, disconnected crossbar (the original codebase's bug #1); it only
-tracks which cells have been "remapped" and how much capacity remains. The
-actual read/restore-write against the canonical CrossbarHandle happens in
-neurofault.mitigation.remap, via the ConductanceAccessor - so this class
-works identically regardless of which backend (memtorch/xbtorch/aihwkit)
-that accessor wraps.
+tracks which cells/rows/columns have been "remapped" and how much capacity
+remains. The actual read/restore-write against the canonical CrossbarHandle
+happens in neurofault.mitigation.remap, via the ConductanceAccessor - so
+these classes work identically regardless of which backend (crosssim/
+aihwkit) that accessor wraps.
 
-This models an idealized, software-only upper bound on redundancy - "restore
-a faulty cell to its pre-fault reference value" - not physical spare
-row/column hardware. That's an explicit, documented scope decision (see
-docs/planning/project-setup-plan.md), not an oversight: real row/column
-redundancy would require padding layer dimensions before the model is
-patched, which is deferred to a later phase.
+Two redundancy schemes (CrossbarConfig.redundancy_scheme), built via
+build_redundancy_pool() below:
+
+- RedundancyPool ("idealized_per_cell"): an idealized, software-only upper
+  bound - "restore a faulty cell to its pre-fault reference value" - not
+  physical spare row/column hardware. Documented scope decision, not an
+  oversight (see docs/planning/project-setup-plan.md).
+- RowColumnRedundancyPool ("row_col_granularity"): repairs whole rows/columns
+  at once - the granularity real designs actually repair at (word-line/
+  bit-line, via the peripheral decoder) - using the *existing* logical
+  crossbar, not physical spare-hardware capacity padded onto it. True
+  physical spare-row/column hardware (padding a layer's crossbar dimensions
+  beyond its logical weight size, with an index remap when one is condemned)
+  would require both backends' patch_layers() to allocate larger-than-logical
+  arrays - a real cross-backend change, still deferred. This class is the
+  honest middle ground: right granularity, not yet right physical model.
 """
 
 from __future__ import annotations
 
 import logging
+from collections import Counter
 
+from neurofault.config import CrossbarConfig
 from neurofault.crossbar.array import CrossbarHandle
 
 logger = logging.getLogger(__name__)
@@ -66,3 +78,115 @@ class RedundancyPool:
 
         self.remapping[pos] = pos  # kept for reporting; see module docstring
         return True
+
+
+class RowColumnRedundancyPool:
+    """Repairs whole rows/columns at once instead of individual cells - see
+    module docstring for why this is the right granularity without yet being
+    the right physical model (no padded spare-hardware capacity).
+
+    Separate spare-row and spare-column capacity, matching how real designs
+    (ISAAC/PRIME-style) carry independent row and column sparing rather than
+    one shared pool. redundancy_factor is reinterpreted per-axis here - a
+    deliberate semantic shift from "fraction of cells" (RedundancyPool) to
+    "fraction of rows" / "fraction of columns" - not a silent reuse.
+    """
+
+    def __init__(
+        self,
+        handle: CrossbarHandle,
+        redundancy_factor: float,
+        condemn_threshold: float,
+    ):
+        self.handle = handle
+        self.condemn_threshold = condemn_threshold
+        rows, cols = handle.accessor.shape
+        self.rows = rows
+        self.cols = cols
+
+        self.row_capacity = max(1, int(rows * redundancy_factor))
+        self.col_capacity = max(1, int(cols * redundancy_factor))
+        self.condemned_rows: set[int] = set()
+        self.condemned_cols: set[int] = set()
+        self.reference_conductance = handle.accessor.read().clone().detach()
+
+        logger.info(
+            "RowColumnRedundancyPool for %s: row_capacity=%d, col_capacity=%d "
+            "(row_col_granularity, %.0f%% of %d rows / %d cols, condemn_threshold=%.2f)",
+            handle.name,
+            self.row_capacity,
+            self.col_capacity,
+            redundancy_factor * 100,
+            rows,
+            cols,
+            condemn_threshold,
+        )
+
+    @property
+    def available_row_capacity(self) -> int:
+        return self.row_capacity - len(self.condemned_rows)
+
+    @property
+    def available_col_capacity(self) -> int:
+        return self.col_capacity - len(self.condemned_cols)
+
+    def condemn_rows_and_cols(
+        self, critical_devices: list[tuple[int, int]]
+    ) -> tuple[list[int], list[int]]:
+        """Decide which rows/columns newly cross condemn_threshold given this
+        batch of critical devices, consume capacity for them, and return the
+        newly-condemned (not previously condemned) row and column indices.
+
+        Pure bookkeeping - does not touch the crossbar. Callers (see
+        neurofault.mitigation.remap.apply_remap) restore the returned rows/
+        columns to reference_conductance via the accessor. Already-condemned
+        rows/columns are never reconsidered - permanent for the run, mirroring
+        RedundancyPool's one-time-consumption semantics.
+        """
+        row_counts = Counter(row for row, _col in critical_devices)
+        col_counts = Counter(col for _row, col in critical_devices)
+
+        candidate_rows = sorted(
+            (
+                row
+                for row, count in row_counts.items()
+                if row not in self.condemned_rows and count / self.cols >= self.condemn_threshold
+            ),
+            key=lambda row: -row_counts[row],
+        )
+        candidate_cols = sorted(
+            (
+                col
+                for col, count in col_counts.items()
+                if col not in self.condemned_cols and count / self.rows >= self.condemn_threshold
+            ),
+            key=lambda col: -col_counts[col],
+        )
+
+        new_rows = candidate_rows[: self.available_row_capacity]
+        new_cols = candidate_cols[: self.available_col_capacity]
+        self.condemned_rows.update(new_rows)
+        self.condemned_cols.update(new_cols)
+        return new_rows, new_cols
+
+
+def build_redundancy_pool(handle: CrossbarHandle, crossbar_config: CrossbarConfig):
+    """Returns the redundancy pool for crossbar_config.redundancy_scheme -
+    same dispatch-by-config-value pattern as devices/registry.py::build_device,
+    so callers (system.py) never branch on scheme themselves."""
+    if crossbar_config.redundancy_scheme == "row_col_granularity":
+        return RowColumnRedundancyPool(
+            handle, crossbar_config.redundancy_factor, crossbar_config.redundancy_condemn_threshold
+        )
+    if crossbar_config.redundancy_scheme == "idealized_per_cell":
+        return RedundancyPool(handle, crossbar_config.redundancy_factor)
+    # Real bug found and fixed this session: this used to be an unconditional
+    # `else` - any unrecognized string (a typo included) silently fell back
+    # to idealized_per_cell, no error. Verified directly:
+    # redundancy_scheme="row_col_granularityy" (one extra letter) silently
+    # produced a plain RedundancyPool. Fail loud instead, same standard as
+    # devices/registry.py's device-name dispatch.
+    raise ValueError(
+        f"Unknown crossbar_config.redundancy_scheme: {crossbar_config.redundancy_scheme!r} "
+        "(expected 'idealized_per_cell' or 'row_col_granularity')"
+    )

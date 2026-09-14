@@ -2,6 +2,7 @@
 # with each branch independently gated - no unconditional fallthrough to any
 # single strategy (bug #2's fix).
 name: combined_all_strategies
+simulator: crosssim
 epochs: 10
 num_batches: 128
 batch_size: 32

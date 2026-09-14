@@ -4,6 +4,20 @@ Ported from the original health_monitor.py, with get_critical_devices()
 rewritten as vectorized tensor ops instead of a Python double for-loop over
 every (row, col) cell - that loop is confirmed (via notebook investigation)
 to have actually caused a real training run to be killed for being too slow.
+
+get_critical_devices() supports two detection methods (MitigationConfig.
+detection_method): "full_diff" (default, always correct - reads every cell)
+and "checksum" (a cheap row/column-sum first pass that falls back to the
+same full_diff scan whenever a mismatch is found, so fault localization is
+identical whenever a fault actually exists - only the no-fault case is
+cheaper). Honesty note: this simulation doesn't model real crossbar
+peripheral-readout circuit cost, so "cheaper" here means modeled cell-touches
+(total_detection_cost/last_detection_cost, surfaced via get_health_summary()),
+not actual wall-clock time - both methods cost one vectorized torch call
+either way in this simulation. Checksums also have a real, known blind spot:
+two faults in the same row/column that shift the sum in exactly-canceling
+directions go undetected - tested explicitly in tests/unit/test_health_monitor.py,
+not just mentioned.
 """
 
 from __future__ import annotations
@@ -36,8 +50,42 @@ class HealthMonitor:
         self.stability_index = torch.ones(self.shape)
         self.operation_counts = torch.zeros(self.shape)
 
+        # Used by faults/injection.py's statistical failure models
+        # (failure_model="weibull"/"exponential"), see that module and
+        # faults/reliability.py. cycles is a simulation-time proxy - one
+        # increment per inject_faults() call a cell survives, not a count of
+        # literal physical read/write operations. stuck_mask marks cells
+        # already permanently failed, so they stop aging and are never
+        # resampled/re-failed - matches real stuck-at fault physics.
+        self.cycles = torch.zeros(self.shape)
+        self.stuck_mask = torch.zeros(self.shape, dtype=torch.bool)
+
+        # Used by faults/injection.py's failure_model="drift" (see
+        # config.py's FaultConfig.drift_magnitude/drift_direction docstring -
+        # a real, distinct failure mode found missing this session:
+        # soft_mitigation targets drift specifically, but this project never
+        # generated any until now). drift_mask marks cells that have ever
+        # drifted - unlike stuck_mask, these cells stay writable/functional,
+        # just imprecise, and dispatch.py targets soft_mitigation at exactly
+        # this mask rather than the broader (and, per this session's
+        # findings, over-inclusive) get_critical_devices() set. drift_sign
+        # is only consulted for drift_direction="random_per_cell": each
+        # affected cell's drift direction is decided once and reused for
+        # every subsequent event (0 = undecided, +1/-1 once assigned) -
+        # real retention drift is monotonic per-device, not a coin flip
+        # every injection call.
+        self.drift_mask = torch.zeros(self.shape, dtype=torch.bool)
+        self.drift_sign = torch.zeros(self.shape)
+
         self.g_history: list[torch.Tensor] = [handle.accessor.read().clone()]
         self.max_history = 20
+
+        # Reference checksums for the "checksum" detection method - reuse
+        # the pristine matrix already captured above, no new snapshot.
+        self.reference_row_checksum = self.g_history[0].sum(dim=1)
+        self.reference_col_checksum = self.g_history[0].sum(dim=0)
+        self.total_detection_cost = 0
+        self.last_detection_cost = 0
 
         self.failure_probability = torch.zeros(self.shape)
 
@@ -46,6 +94,23 @@ class HealthMonitor:
     def update_health_metrics(
         self, voltage_applied: torch.Tensor | None = None, write_op: bool = False
     ):
+        """Real bug found and fixed this session: this function used to
+        recompute stress/health_scores/stability_index for every cell,
+        stuck_mask included - a permanently-stuck cell's own conductance
+        never changes, so its deviation/instability terms settle into a
+        small steady-state stress value, and `stress = stress*0.99 +
+        new_stress` decays *toward* that steady state every call regardless
+        of the cell being dead forever. Verified directly: a cell injected
+        with health_scores=0, stress=0.9 reached health_scores=74.73 after
+        200 calls to this function - a permanently-failed cell silently
+        reporting itself as mostly healthy. Fix: snapshot stuck-position
+        values before the (unchanged) computation below, restore them after -
+        stuck cells are now provably inert to this function, not just
+        usually-inert in practice."""
+        stuck_stress = self.stress[self.stuck_mask].clone()
+        stuck_health = self.health_scores[self.stuck_mask].clone()
+        stuck_stability = self.stability_index[self.stuck_mask].clone()
+
         current_g = self.handle.accessor.read()
         self.operation_counts += 1
 
@@ -76,6 +141,14 @@ class HealthMonitor:
 
         self.stress = torch.clamp(self.stress * 0.99 + new_stress, 0.0, 1.0)
         self.health_scores = torch.clamp(100 * (1.0 - self.stress), 0, 100)
+
+        # Restore stuck cells - see this function's docstring for the bug
+        # this closes. A stuck cell's conductance never changes, so nothing
+        # above is meaningful for it; freezing it here, not skipping it
+        # above, keeps the non-stuck-cell computation identically vectorized.
+        self.stress[self.stuck_mask] = stuck_stress
+        self.health_scores[self.stuck_mask] = stuck_health
+        self.stability_index[self.stuck_mask] = stuck_stability
 
         self.g_history.append(current_g.clone())
         if len(self.g_history) > self.max_history:
@@ -110,13 +183,45 @@ class HealthMonitor:
         health_threshold: float = 10,
         probability_threshold: float = 0.8,
         extreme_threshold: float = 0.02,
+        detection_method: str = "full_diff",
+        checksum_z_threshold: float = 3.0,
     ) -> list[tuple[int, int]]:
         """Vectorized replacement for the original's Python double for-loop.
 
         Computes the full-array condition as one boolean mask, then converts
         to a Python list only over the (small) filtered result via
         torch.nonzero - never iterates every cell in Python.
+
+        detection_method="checksum": cheap row/column-sum first pass (see
+        module docstring). Returns [] immediately if no row/column checksum
+        is flagged (modeled cost rows+cols) - otherwise falls through to the
+        exact same full-diff scan below (modeled cost rows*cols), so a real
+        fault is localized exactly as precisely as the default path.
         """
+        if detection_method not in ("full_diff", "checksum"):
+            # Real bug found and fixed this session: this dispatch used to
+            # silently treat any unrecognized string as "full_diff" (the
+            # `if detection_method == "checksum": ... ` block below simply
+            # never triggered) - a typo'd config value ran indistinguishably
+            # from a correctly-configured one. Fail loud instead.
+            raise ValueError(
+                f"Unknown detection_method: {detection_method!r} "
+                "(expected 'full_diff' or 'checksum')"
+            )
+
+        rows, cols = self.shape
+        if detection_method == "checksum":
+            mismatched_rows, mismatched_cols = self._checksum_mismatch_rows_cols(
+                checksum_z_threshold
+            )
+            if not mismatched_rows.any() and not mismatched_cols.any():
+                self.last_detection_cost = rows + cols
+                self.total_detection_cost += self.last_detection_cost
+                return []
+
+        self.last_detection_cost = rows * cols
+        self.total_detection_cost += self.last_detection_cost
+
         self.predict_faults()
         g_normalized = torch.clamp((self.handle.accessor.read() - self.g_min) / self.g_range, 0, 1)
         mask = (
@@ -125,8 +230,53 @@ class HealthMonitor:
             | (g_normalized < extreme_threshold)
             | (g_normalized > (1 - extreme_threshold))
         )
-        rows, cols = torch.nonzero(mask, as_tuple=True)
-        return list(zip(rows.tolist(), cols.tolist()))
+        rows_idx, cols_idx = torch.nonzero(mask, as_tuple=True)
+        return list(zip(rows_idx.tolist(), cols_idx.tolist()))
+
+    def _checksum_mismatch_rows_cols(self, z_threshold: float) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (mismatched_rows, mismatched_cols) boolean masks.
+
+        Real detection-method upgrade made this session (see docs/planning/
+        "Catching Up" plan): a row/column used to be flagged against a fixed
+        fraction of g_range, the same absolute threshold regardless of how
+        much checksums naturally fluctuate from ordinary training. Now
+        adaptive (V-ABFT's approach, 2026): flag a row/column as an outlier
+        relative to the whole population of row/column deviations this call,
+        rather than a fixed magnitude always meaning "fault."
+
+        Uses median/MAD (median absolute deviation), not mean/std - verified
+        directly why this matters: a plain mean+z*std z-score is itself
+        skewed by the very outlier it's trying to detect, especially in a
+        small population (a single faulty row among 6 inflates the
+        population's own std enough that the outlier no longer clears its
+        own threshold). Median/MAD stays anchored to the majority as long as
+        faults are a minority - the standard "modified z-score" convention
+        (0.6745 scales MAD to be comparable to std for a normal
+        distribution). When MAD is exactly 0 (the reference population has
+        no spread at all - e.g. a freshly-constructed monitor before any
+        training has touched any row), any nonzero deviation is anomalous by
+        definition, handled explicitly rather than dividing by zero.
+
+        Same honest limitation either way: self-referential to the current
+        population, so it degrades once faults are a majority rather than a
+        minority of rows/columns.
+        """
+        current = self.handle.accessor.read()
+        row_deviation = (current.sum(dim=1) - self.reference_row_checksum).abs()
+        col_deviation = (current.sum(dim=0) - self.reference_col_checksum).abs()
+
+        row_mismatch = self._is_outlier(row_deviation, z_threshold)
+        col_mismatch = self._is_outlier(col_deviation, z_threshold)
+        return row_mismatch, col_mismatch
+
+    @staticmethod
+    def _is_outlier(deviation: torch.Tensor, z_threshold: float) -> torch.Tensor:
+        median = deviation.median()
+        mad = (deviation - median).abs().median()
+        if mad == 0:
+            return deviation > 0
+        modified_z = 0.6745 * (deviation - median).abs() / mad
+        return modified_z > z_threshold
 
     def get_health_summary(self) -> dict:
         self.predict_faults()
@@ -136,4 +286,5 @@ class HealthMonitor:
             "avg_stability": self.stability_index.mean().item(),
             "avg_failure_prob": self.failure_probability.mean().item(),
             "critical_count": (self.health_scores < 20).sum().item(),
+            "detection_cost": self.total_detection_cost,
         }

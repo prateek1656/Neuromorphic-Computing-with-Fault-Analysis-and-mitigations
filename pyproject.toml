@@ -4,11 +4,8 @@ version = "0.1.0"
 description = "Fault-tolerant memristive crossbar neuromorphic computing simulation"
 requires-python = ">=3.10"
 dependencies = [
-    # No upper bound: XBTorch needs torch>=2.3 and AIHWKit hard-pins torch==2.13.0
-    # (2.13.0 satisfies both >=2.2 here and xbtorch's >=2.3, so - contrary to an
-    # earlier assumption before actually checking the numbers - a single
-    # environment CAN satisfy all three simultaneously; an upper bound here would
-    # have been the only real source of conflict).
+    # No upper bound: CrossSim and AIHWKit both resolve fine against a recent
+    # torch (verified this session) - no known conflicting pin between them.
     "torch>=2.2",
     "torchvision>=0.17",
     "numpy>=1.26,<2.0",
@@ -18,26 +15,44 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# memtorch is intentionally NOT declared as a project/optional dependency here.
-# Its setup.py builds a CUDA extension unconditionally and fails at build-metadata
-# time on any machine without an NVIDIA driver (confirmed in this sandbox) -
-# declaring it as an optional-dependency still forces uv to try building it
-# during resolution. Install manually on a CUDA-capable machine instead, see
-# docs/planning/project-setup-plan.md and README for the exact command:
-#   uv pip install torch && uv pip install memtorch --no-build-isolation
-# The core neurofault package and its unit tests never import memtorch directly
-# at module scope (see tests/unit/fakes.py) so they work without it.
-xbtorch = [
-    "xbtorch @ git+https://github.com/ADAM-Lab-GW/xbtorch.git",
+# MemTorch and XBTorch were both evaluated and dropped entirely. MemTorch:
+# unmaintained since 2022, broken PyPI packaging (CUDA build requires an
+# NVIDIA driver at build-metadata time; the CPU variant pins the now-
+# deprecated `sklearn` package name). XBTorch: worked, but only in
+# bookkeeping-only mode (its forward pass never consumed the crossbar's
+# conductance state); a deeper investigation found its actual analog-compute
+# code path is unwired from its public API and has a real dimension-swap bug
+# in SimpleFixedPoint itself - removed once CrossSim proved to be an equally
+# easy install with a genuine fault-to-accuracy forward pass. See
+# docs/planning/project-setup-plan.md §9 for both. CrossSim and AIHWKit are
+# the two supported backends.
+# Not on PyPI - pinned to the v3.2.1 tag (the exact release verified working
+# this session: pure Python/NumPy/SciPy, no C++ build, real fault-to-accuracy
+# forward pass). Package/import name is "simulator", not "crosssim".
+crosssim = [
+    "CrossSim @ git+https://github.com/sandialabs/cross-sim.git@v3.2.1",
 ]
 aihwkit = [
     "aihwkit>=1.1.0",
+]
+# Only needed on a CUDA box with crossbar.use_gpu=true (see config.py's
+# CrossbarConfig.use_gpu) - CrossSim's ComputeBackend swaps its whole array
+# module to cupy when GPU mode is on. cupy-cuda12x matches the CUDA 12.x
+# runtime this project's Dockerfile targets - not installable/needed on this
+# session's CPU-only Mac.
+gpu = [
+    "cupy-cuda12x>=13.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0,<9.0",
     "ruff>=0.6,<1.0",
+    # tests/invariants/ only: real goodness-of-fit tests (scipy.stats.kstest/
+    # binomtest) and property-based fuzzing (hypothesis) for the deep
+    # correctness suite - never a runtime dependency.
+    "scipy>=1.11,<2.0",
+    "hypothesis>=6.100,<7.0",
 ]
 
 [project.scripts]
@@ -55,6 +70,10 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "statistical: many-trial/many-seed goodness-of-fit checks (tests/invariants/) - a tiny, documented false-failure rate at any fixed significance threshold, not a flaky test to retry.",
+    "slow: a real (if tiny) end-to-end training loop - opt-in, run before trusting any real experiment, not part of the fast default loop.",
+]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata below.
+  If you are citing the underlying research, please use the
+  "preferred-citation" (the dissertation) instead.
+title: neurofault
+type: software
+abstract: >-
+  Fault-tolerant memristive crossbar neuromorphic computing simulation:
+  crossbar fault injection (stuck-at, drift, runtime faults) against
+  health-monitoring mitigation strategies (soft mitigation, targeted layer
+  reset, redundancy remapping, fault-aware retraining), across multiple
+  device technologies (VTEAM, FeFET, STT-MRAM) and two simulation backends
+  (Sandia CrossSim, IBM AIHWKit).
+authors:
+  - family-names: Yadav
+    given-names: Prateek
+repository-code: >-
+  https://github.com/prateek1656/Neuromorphic-Computing-with-Fault-Analysis-and-mitigations
+license: MIT
+preferred-citation:
+  type: thesis
+  thesis-type: "Master's thesis"
+  title: >-
+    Design and Analysis of Fault-Tolerant Memristive Crossbar for
+    Neuromorphic Computing
+  authors:
+    - family-names: Yadav
+      given-names: Prateek
+  institution:
+    name: School of Engineering, Jawaharlal Nehru University
+    city: New Delhi
+    country: IN
+  month: 5
+  year: 2025
+  notes: >-
+    Submitted in partial fulfilment of the requirements for the degree of
+    Master of Technology in Computer Science and Engineering (dual degree
+    programme). Supervised by Dr F. Lalchhandama; co-supervised by
+    Dr. Kethavath Kranthi Kumar.

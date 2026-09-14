@@ -2,6 +2,7 @@
 # original main.py's 4 configs - added here to establish the accuracy
 # baseline against which every mitigation strategy's recovery is measured.
 name: baseline_no_fault
+simulator: crosssim
 epochs: 15
 num_batches: 128
 batch_size: 32

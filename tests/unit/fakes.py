@@ -1,8 +1,7 @@
 """A lightweight stand-in implementing ConductanceAccessor, exposing only
 the interface the rest of neurofault actually depends on. Lets crossbar/
-faults/mitigation logic be unit-tested without any real backend (memtorch/
-xbtorch/aihwkit) installed - all three have fragile or GPU-dependent builds
-(see docs/planning/project-setup-plan.md).
+faults/mitigation logic be unit-tested without any real backend (crosssim/
+aihwkit) installed.
 """
 
 from __future__ import annotations

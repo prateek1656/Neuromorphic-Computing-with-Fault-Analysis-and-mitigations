@@ -3,6 +3,7 @@
 # from the runtime-fault path (bug #4), not only via a predictive path whose
 # history never accumulated in practice.
 name: soft_mitigation_only
+simulator: crosssim
 epochs: 20
 num_batches: 128
 batch_size: 32

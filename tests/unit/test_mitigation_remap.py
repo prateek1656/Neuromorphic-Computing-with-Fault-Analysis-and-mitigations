@@ -1,4 +1,6 @@
-from neurofault.crossbar.self_healing import RedundancyPool
+import torch
+
+from neurofault.crossbar.self_healing import RedundancyPool, RowColumnRedundancyPool
 from neurofault.mitigation.remap import apply_remap
 from tests.unit.fakes import make_handle
 
@@ -40,3 +42,37 @@ def test_remap_stops_when_redundancy_capacity_exhausted():
 
     assert remapped == 1
     assert pool.available_capacity == 0
+
+
+def test_apply_remap_dispatches_to_row_col_granularity_via_pool_type():
+    """apply_remap() must branch on pool type, not require dispatch.py (or
+    any other caller) to know which redundancy scheme is active."""
+    handle = make_handle(shape=(10, 10))
+    pool = RowColumnRedundancyPool(handle, redundancy_factor=0.5, condemn_threshold=0.5)
+
+    reference_row = pool.reference_conductance[0, :].clone()
+    matrix = handle.accessor.read()
+    matrix[0, :] = 999.0  # corrupt every cell in row 0
+    handle.accessor.write(matrix)
+
+    critical = [(0, c) for c in range(10)]  # whole row critical -> condemns row 0
+    remapped = apply_remap(handle, pool, critical)
+
+    assert remapped == 1  # one row repaired, per the row/col-granularity return convention
+    assert torch.equal(handle.accessor.read()[0, :], reference_row)
+
+
+def test_apply_remap_row_col_granularity_restores_columns_too():
+    handle = make_handle(shape=(10, 10))
+    pool = RowColumnRedundancyPool(handle, redundancy_factor=0.5, condemn_threshold=0.5)
+
+    reference_col = pool.reference_conductance[:, 3].clone()
+    matrix = handle.accessor.read()
+    matrix[:, 3] = 999.0
+    handle.accessor.write(matrix)
+
+    critical = [(r, 3) for r in range(10)]
+    remapped = apply_remap(handle, pool, critical)
+
+    assert remapped == 1
+    assert torch.equal(handle.accessor.read()[:, 3], reference_col)

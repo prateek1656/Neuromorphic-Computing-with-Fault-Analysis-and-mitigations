@@ -3,6 +3,7 @@
 # explicitly per docs/planning/project-setup-plan.md rather than presented
 # as an established result.
 name: layer_reset_only
+simulator: crosssim
 epochs: 20
 num_batches: 128
 batch_size: 32
